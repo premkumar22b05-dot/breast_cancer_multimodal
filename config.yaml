@@ -1,0 +1,500 @@
+# Breast Cancer Multimodal Detection - Configuration File
+# Research Pipeline for Cross-Attentive Stacking Ensemble
+
+# ============================================================================
+# DATA CONFIGURATION
+# ============================================================================
+data:
+  # Auto-detect dataset mode: 'vindr_mammo', 'cbis_ddsm', 'custom'
+  mode: auto
+  dataset: vindr_mammo
+  
+  # Directory structure
+  raw_dir: data/raw
+  images_dir: data/images
+  annotations_dir: data/annotations
+  clinical_dir: data/clinical
+  processed_dir: data/processed
+  
+  # Image parameters
+  image_size: 512
+  num_views: 4  # CC-L, CC-R, MLO-L, MLO-R
+  
+  # Preprocessing
+  use_clahe: true
+  clahe_clip_limit: 2.0
+  clahe_tile_size: 8
+  
+  use_local_patches: true
+  local_patch_size: 256
+  
+  normalize_method: z_score  # z_score, min_max, robust
+  
+  # Background suppression
+  background_threshold: 0.05
+  breast_region_padding: 10
+
+# ============================================================================
+# CLINICAL DATA CONFIGURATION
+# ============================================================================
+clinical:
+  # Enable multimodal fusion when clinical data is available
+  enabled: true
+  
+  # Feature definitions
+  continuous_features:
+    - age
+    - bmi
+  
+  categorical_features:
+    - breast_density          # A, B, C, D
+    - family_history          # 0, 1
+    - menopausal_status       # pre, post
+    - previous_breast_abnormality  # 0, 1
+  
+  # Missing value imputation strategy
+  imputation_strategy: simple  # simple (mean/mode) or knn
+  imputation_neighbors: 5
+  
+  # Clinical feature standardization
+  standardize: true
+
+# ============================================================================
+# TARGET DEFINITION
+# ============================================================================
+target:
+  # Binary classification task
+  task_name: malignancy_classification
+  
+  # BI-RADS category mapping to binary labels
+  positive_birads:
+    - 4
+    - 5
+  
+  negative_birads:
+    - 1
+    - 2
+  
+  # Exclude intermediate category (BI-RADS 3 = follow-up)
+  exclude_birads:
+    - 3
+  
+  # Alternative: abnormality presence (for ablation)
+  secondary_task: abnormality_presence
+
+# ============================================================================
+# DATA SPLITTING CONFIGURATION
+# ============================================================================
+data_split:
+  # Patient-level strict splitting (no data leakage)
+  strategy: patient_stratified
+  
+  # Train/Val/Test proportions
+  train_ratio: 0.7
+  val_ratio: 0.15
+  test_ratio: 0.15
+  
+  # Random seed for reproducible splits
+  random_seed: 42
+  
+  # Stratify by class and density
+  stratify_by:
+    - target
+    - breast_density
+
+# ============================================================================
+# DATA AUGMENTATION
+# ============================================================================
+augmentation:
+  # Training-time augmentation only
+  enable_train_aug: true
+  enable_val_aug: false
+  enable_test_aug: false
+  
+  # Augmentation parameters (medically reasonable)
+  rotation_degrees: 15
+  affine_scale: [0.9, 1.1]
+  affine_shear: 10
+  
+  # Intensity variations
+  brightness_factor: 0.15
+  contrast_factor: 0.15
+  
+  # Horizontal flip handling
+  # Only apply if laterality semantics are properly handled
+  horizontal_flip_prob: 0.5
+  
+  # Random crop
+  random_crop_size: 448
+  
+  # Elastic deformation
+  elastic_deformation: false
+
+# ============================================================================
+# MODEL ARCHITECTURE
+# ============================================================================
+model:
+  # Feature dimension across all branches
+  d_model: 256
+  dropout: 0.2
+  layer_norm_eps: 1e-6
+  
+  # ========================================================================
+  # BRANCH 1: SWIN TRANSFORMER (Global structure)
+  # ========================================================================
+  swin:
+    enabled: true
+    name: swin_tiny_patch4_window7_224
+    pretrained: true
+    freeze_backbone: false
+    output_dim: 768  # Automatically detected
+    
+    # Optional: use only features without classification head
+    use_features_only: true
+  
+  # ========================================================================
+  # BRANCH 2: DENSENET-121 (Local texture/patterns)
+  # ========================================================================
+  densenet:
+    enabled: true
+    name: densenet121
+    pretrained: true
+    freeze_backbone: false
+    output_dim: 1024
+    
+    use_features_only: true
+  
+  # ========================================================================
+  # BRANCH 3: TABULAR TRANSFORMER (Clinical features)
+  # ========================================================================
+  tabular_transformer:
+    enabled: true
+    
+    # Embedding dimensions
+    continuous_embedding_dim: 32
+    categorical_embedding_dim: 16
+    
+    # Transformer architecture
+    num_layers: 2
+    num_heads: 4
+    ffn_dim: 128
+    activation: relu
+    
+    output_dim: 128
+  
+  # ========================================================================
+  # CROSS-ATTENTION FUSION
+  # ========================================================================
+  cross_attention:
+    enabled: true
+    
+    # Attention mechanism
+    num_heads: 4
+    num_layers: 2
+    dropout: 0.1
+    
+    # Query source, Key/Value source
+    # Options: visual_to_clinical, clinical_to_visual, bidirectional
+    mode: bidirectional
+    
+    # Normalization
+    use_layer_norm: true
+  
+  # ========================================================================
+  # GATED MULTIMODAL FUSION
+  # ========================================================================
+  gated_fusion:
+    enabled: true
+    
+    # Gate mechanism
+    gate_type: sigmoid  # sigmoid, gelu, relu
+    
+    # Fusion residual connection
+    use_residual: true
+    
+    # Output projection
+    output_dim: 256
+
+# ============================================================================
+# ENSEMBLE CONFIGURATION
+# ============================================================================
+ensemble:
+  # Stacking ensemble strategy
+  strategy: stacking  # stacking, voting, averaging
+  
+  # Base learners
+  base_models:
+    - xgboost
+    - mlp
+    - logistic_regression
+  
+  # Base learner configurations
+  xgboost_config:
+    n_estimators: 100
+    max_depth: 6
+    learning_rate: 0.1
+    subsample: 0.8
+    colsample_bytree: 0.8
+    objective: binary:logistic
+    eval_metric: auc
+    random_state: 42
+  
+  mlp_config:
+    hidden_layers: [128, 64]
+    activation: relu
+    dropout: 0.3
+    learning_rate: 0.001
+    epochs: 100
+    batch_size: 32
+  
+  logistic_regression_config:
+    C: 1.0
+    max_iter: 1000
+    solver: lbfgs
+    random_state: 42
+  
+  # Meta-learner (trained on out-of-fold predictions)
+  meta_model: logistic_regression
+  
+  # Cross-validation for out-of-fold predictions
+  cv_folds: 5
+  cv_strategy: stratified  # stratified, kfold
+  
+  # Ensure out-of-fold predictions are used (safety check)
+  enforce_oof: true
+
+# ============================================================================
+# TRAINING CONFIGURATION
+# ============================================================================
+training:
+  # Reproducibility
+  seed: 42
+  deterministic: true
+  
+  # Learning parameters
+  epochs: 30
+  batch_size: 4
+  learning_rate: 1e-4
+  weight_decay: 1e-4
+  
+  # Optimizer
+  optimizer: AdamW
+  optimizer_kwargs:
+    betas: [0.9, 0.999]
+    eps: 1e-8
+  
+  # Learning rate scheduler
+  scheduler: cosine  # cosine, step, exponential, none
+  scheduler_kwargs:
+    T_max: 30
+    eta_min: 1e-6
+  
+  # Mixed precision training (if CUDA available)
+  mixed_precision: true
+  
+  # Gradient clipping
+  gradient_clip_value: 1.0
+  
+  # Early stopping
+  early_stopping:
+    enabled: true
+    metric: val_auc
+    patience: 5
+    min_delta: 1e-4
+    mode: max  # max for AUC, min for loss
+  
+  # Loss function
+  loss_function: bce_with_logits  # bce_with_logits, focal, weighted_bce
+  
+  # Class weights (calculated from training data only)
+  use_class_weights: true
+  pos_weight_multiplier: 1.0  # Will be calculated
+
+# ============================================================================
+# VALIDATION CONFIGURATION
+# ============================================================================
+validation:
+  # Validation frequency
+  val_every_n_epochs: 1
+  
+  # Metrics to compute
+  metrics:
+    - accuracy
+    - precision
+    - recall
+    - specificity
+    - f1
+    - roc_auc
+    - pr_auc
+    - mcc
+    - balanced_accuracy
+    - kappa
+    - log_loss
+    - brier_score
+  
+  # Prediction threshold
+  threshold: 0.5
+  
+  # Threshold optimization
+  optimize_threshold_on_val: true
+  target_specificities: [0.90, 0.95]
+
+# ============================================================================
+# EVALUATION CONFIGURATION
+# ============================================================================
+evaluation:
+  # Confidence intervals
+  bootstrap:
+    enabled: true
+    iterations: 2000
+    confidence_level: 0.95
+    n_jobs: -1
+  
+  # Calibration evaluation
+  calibration:
+    enabled: true
+    method: reliability_diagram  # reliability_diagram, isotonic, temperature
+    n_bins: 10
+  
+  # Subgroup analysis
+  subgroup_analysis:
+    enabled: true
+    
+    # Breast density subgroups
+    density_groups: [A, B, C, D]
+    
+    # Age subgroups (optional)
+    age_groups:
+      young: [18, 40]
+      middle: [40, 55]
+      senior: [55, 100]
+    
+    # Size subgroups (if lesion annotations available)
+    size_groups:
+      small: [0, 5]
+      medium: [5, 10]
+      large: [10, 50]
+  
+  # Lesion localization (optional, only if annotations available)
+  lesion_localization:
+    enabled: false
+    
+    # Evaluation metrics
+    iou_threshold: 0.5
+    metrics:
+      - iou
+      - sensitivity
+      - fp_per_image
+      - froc
+
+# ============================================================================
+# EXPLAINABILITY
+# ============================================================================
+explainability:
+  # Grad-CAM for DenseNet
+  gradcam:
+    enabled: true
+    layer_name: features
+    num_examples: 8
+    
+    # Example selection strategy
+    select_strategy: diverse  # diverse, random, extreme
+  
+  # Swin attention visualization
+  swin_attention:
+    enabled: true
+    visualization_method: attention_rollout  # attention_rollout, token_attention
+  
+  # SHAP for ensemble/clinical features
+  shap:
+    enabled: true
+    method: tree  # tree for XGBoost, kernel for others
+    num_background_samples: 100
+    num_explain_samples: 50
+
+# ============================================================================
+# COMPUTATION
+# ============================================================================
+compute:
+  # Device selection
+  device: auto  # auto, cuda, cpu
+  
+  # Multi-GPU
+  multi_gpu: false
+  gpu_ids: [0]
+  
+  # Number of workers for data loading
+  num_workers: 4
+  pin_memory: true
+  
+  # Profiling
+  profile_memory: false
+  profile_time: false
+
+# ============================================================================
+# LOGGING AND CHECKPOINTING
+# ============================================================================
+logging:
+  # Logging level
+  level: INFO  # DEBUG, INFO, WARNING, ERROR
+  
+  # Log file location
+  log_dir: results/logs
+  
+  # Tensorboard
+  tensorboard:
+    enabled: true
+    log_dir: results/tensorboard
+  
+  # Weights & Biases
+  wandb:
+    enabled: false
+    project: breast_cancer_multimodal
+    entity: null
+
+checkpoint:
+  # Checkpoint directory
+  save_dir: results/checkpoints
+  
+  # Save strategy
+  save_best_only: true
+  save_frequency: 1  # Every N epochs
+  
+  # Keep top K checkpoints
+  keep_top_k: 3
+
+# ============================================================================
+# EXPERIMENT MODES
+# ============================================================================
+experiment:
+  # Available modes:
+  # smoke_test: minimal run for debugging
+  # train: full training
+  # evaluate: evaluation only
+  # inference: single sample inference
+  
+  mode: train
+  
+  # Experiment variants (for ablation study)
+  variant: proposed  # proposed, baseline_densenet, baseline_swin, ablation_*
+  
+  # Save all results
+  save_results: true
+  results_dir: results
+  
+  # Generate report
+  generate_report: true
+
+# ============================================================================
+# REPRODUCIBILITY AND METADATA
+# ============================================================================
+reproducibility:
+  # Random seed
+  seed: 42
+  
+  # Record system information
+  record_metadata: true
+  metadata_file: results/run_metadata.json
+  
+  # Save configuration
+  save_config: true
